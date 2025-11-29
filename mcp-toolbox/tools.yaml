@@ -1,0 +1,36 @@
+sources:
+  my-bigquery-source:
+    kind: "bigquery"
+    project: "bnb-deep-2025"
+    useClientOAuth: true
+tools:
+  execute_sql_tool:
+    kind: bigquery-execute-sql
+    source: my-bigquery-source
+    description: Use this tool to execute sql statement in BigQuery.
+  forecast_tool:
+    kind: bigquery-forecast
+    source: my-bigquery-source
+    description: Use this tool to forecast time series data in BigQuery.
+  bigquery_get_table_info:
+    kind: bigquery-get-table-info
+    source: my-bigquery-source
+    description: Use this tool to get table metadata.
+  bigquery_list_dataset_ids:
+    kind: bigquery-list-dataset-ids
+    source: my-bigquery-source
+    description: Use this tool to get dataset metadata.
+  bigquery_list_table_ids:
+    kind: bigquery-list-table-ids
+    source: my-bigquery-source
+    description: Use this tool to get table metadata.
+  search_catalog:
+    kind: bigquery-search-catalog
+    source: my-bigquery-source
+    description: Use this tool to find tables, views, models, routines or connections.
+  ask_data_insights:
+    kind: bigquery-conversational-analytics
+    source: my-bigquery-source
+    description: |
+      Use this tool to perform data analysis, get insights, or answer complex
+      questions about the contents of specific BigQuery tables.
