@@ -3,21 +3,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 
 	"github.com/gorilla/mux"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/cmd/launcher"
-	"google.golang.org/adk/cmd/launcher/universal"
+	"google.golang.org/adk/cmd/launcher/full"
 	"google.golang.org/adk/cmd/launcher/web"
-	"google.golang.org/adk/cmd/launcher/web/api"
 	"google.golang.org/adk/cmd/launcher/web/webui"
 	"google.golang.org/adk/model/gemini"
 	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/geminitool"
+	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/tool/mcptoolset"
 	"google.golang.org/genai"
 )
 
@@ -66,6 +68,38 @@ func (l *ExtendedWebUISubLauncher) UserMessage(webURL string, printer func(v ...
 	l.Sublauncher.UserMessage(webURL, printer)
 }
 
+const (
+	authorizationCodeStateName string = "authorization_code"
+)
+
+type OauthMCPCustomHTTPTransport struct {
+	http.RoundTripper
+}
+
+func (t *OauthMCPCustomHTTPTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	ctx := req.Context()
+	newReq := req.Clone(ctx)
+	toolContext, ok := ctx.(tool.Context)
+	if ok {
+		toolContextState := toolContext.State()
+		val, err := toolContextState.Get(authorizationCodeStateName)
+		if err == nil {
+			valStr, ok := val.(string)
+			if ok {
+				newReq.Header.Set("Authorization", "Bearer "+valStr)
+			}
+		}
+	}
+
+	transport := t.RoundTripper
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+
+	// 4. Execute the request
+	return transport.RoundTrip(newReq)
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -77,14 +111,83 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to create model: %v", err)
 	}
+	//
+	mcpToolSet, err := mcptoolset.New(mcptoolset.Config{
+		Transport: &mcp.SSEClientTransport{
+			HTTPClient: &http.Client{
+				Transport: &OauthMCPCustomHTTPTransport{
+					http.DefaultTransport,
+				},
+			},
+			Endpoint: "https://mcp-toolbox-280946129258.asia-southeast1.run.app/mcp/sse",
+		},
+	})
+	if err != nil {
+		log.Fatalf("Failed to create MCP tool set: %v", err)
+	}
+
+	type AuthorizationCode struct {
+		AuthorizationCode string
+	}
+
+	oauthCodePreparation, err := functiontool.New(functiontool.Config{
+		Name:        "prepare_oauth_auth_code",
+		Description: "You need to call this tool before executing oauth2 tools to prepare the authorization code",
+	}, func(t tool.Context, args AuthorizationCode) (string, error) {
+		state := t.State()
+		err := state.Set(authorizationCodeStateName, args.AuthorizationCode)
+		if err != nil {
+			return "Fail", err
+		}
+		return "Success", nil
+	})
+	if err != nil {
+		log.Fatalf("Failed to create tool: %v", err)
+	}
+
+	oauthCodeUserDataFetch, err := functiontool.New(functiontool.Config{
+		Name:        "user_oauth_data",
+		Description: "This tool is used to fetch oauth user data. This tool will use prepared authorization code",
+	}, func(t tool.Context, args any) (string, error) {
+		state := t.State()
+		authCode, err := state.Get(authorizationCodeStateName)
+		if err != nil {
+			return "Fail", err
+		}
+		authCodeStr, ok := authCode.(string)
+		if !ok {
+			return "Fail", fmt.Errorf("auth code is not a string")
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", "https://www.googleapis.com/oauth2/v2/userinfo", nil)
+		if err != nil {
+			return "Fail", err
+		}
+		req.Header.Add("Authorization", "Bearer "+authCodeStr)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return "Fail", err
+		}
+		defer resp.Body.Close()
+
+		content, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return "Fail", err
+		}
+
+		return string(content), nil
+	})
 
 	// Create the Agent with our custom tool
 	myAgent, err := llmagent.New(llmagent.Config{
-		Name:        "auth_agent",
-		Description: "An agent that demonstrates OAuth integration.",
+		Name:        "data_anaylst_agent",
+		Description: "An agent that will be a data analyst to get insights from our datastore",
 		Model:       model,
 		Tools: []tool.Tool{
-			geminitool.GoogleSearch{},
+			oauthCodePreparation,
+			oauthCodeUserDataFetch,
+		},
+		Toolsets: []tool.Toolset{
+			mcpToolSet,
 		},
 	})
 	if err != nil {
@@ -96,11 +199,7 @@ func main() {
 		AgentLoader: agent.NewSingleLoader(myAgent),
 	}
 
-	apiLauncher := api.NewLauncher()
-	uiLauncher := NewExtendedWebUISubLauncher()
-
-	l := universal.NewLauncher(web.NewLauncher(apiLauncher, uiLauncher))
-	//l := full.NewLauncher()
+	l := full.NewLauncher()
 	if err := l.Execute(ctx, config, os.Args[1:]); err != nil {
 		log.Fatalf("Run failed: %v", err)
 	}
